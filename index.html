@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="vi">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -23,7 +23,7 @@
             background-color: #fff;
             box-shadow: 0 0 5px rgba(0,0,0,0.1);
         }
-        .price-board, .history-full {
+        .price-board, .history-full, .stats {
             margin-top: 10px;
         }
         table {
@@ -56,10 +56,16 @@
         canvas {
             margin-top: 10px;
             max-height: 200px;
+            display: none;
         }
         .history-full {
             max-height: 150px;
             overflow-y: auto;
+        }
+        .stats {
+            font-size: 0.9em;
+            background-color: #f9f9f9;
+            padding: 5px;
         }
     </style>
 </head>
@@ -68,17 +74,28 @@
     <div class="controls">
         <button onclick="toggleSimulation()">Start/Stop</button>
         <span>Speed: <input type="range" id="speed" min="500" max="5000" value="2000" onchange="updateSpeed()"> ms</span>
+        <label><input type="checkbox" id="sound" checked> Sound</label>
+        <select id="stock-select" onchange="updateStockDisplay()">
+            <option value="all">All Stocks</option>
+            <option value="VinGroup">VinGroup</option>
+            <option value="Vietcombank">Vietcombank</option>
+            <option value="FPT">FPT</option>
+        </select>
+        <button onclick="toggleCharts()">Toggle Charts</button>
     </div>
     <div id="market" class="market-container"></div>
     <div class="index-box">VN-Index: <span id="vn-index">0</span> điểm</div>
 
     <script>
-        // Class mô phỏng lệnh (order)
         class Order {
-            constructor(price, volume, time) {
+            constructor(id, type, price, volume, time, isBuy) {
+                this.id = id;
+                this.type = type; // LO (Limit Order), MP (Market Price), ATO/ATC
                 this.price = price;
                 this.volume = volume;
                 this.time = time;
+                this.isBuy = isBuy;
+                this.status = 'Pending';
             }
         }
 
@@ -86,32 +103,68 @@
             constructor(name, initialPrice) {
                 this.name = name;
                 this.price = initialPrice;
+                this.referencePrice = initialPrice; // Giá tham chiếu
                 this.bids = [];
                 this.asks = [];
-                this.history = []; 
-                this.priceHistory = [{ time: new Date().toLocaleTimeString(), price: initialPrice }]; 
+                this.history = [];
+                this.priceHistory = [{ time: new Date().toLocaleTimeString(), price: initialPrice }];
                 this.chart = null;
+                this.pressure = 0;
+                this.totalVolume = 0;
+                this.highPrice = initialPrice;
+                this.lowPrice = initialPrice;
+                this.orderId = 0;
             }
 
-            addBid(price, volume) {
-                this.bids.push(new Order(price, volume, Date.now()));
+            addBid(price, volume, type = 'LO') {
+                const order = new Order(this.orderId++, type, price, volume, Date.now(), true);
+                if (type === 'MP') order.price = this.asks.length ? this.asks[0].price : this.price + 1000;
+                if (type === 'ATO' || type === 'ATC') order.price = this.price;
+                this.bids.push(order);
                 this.bids.sort((a, b) => b.price - a.price || a.time - b.time);
             }
 
-            addAsk(price, volume) {
-                this.asks.push(new Order(price, volume, Date.now()));
+            addAsk(price, volume, type = 'LO') {
+                const order = new Order(this.orderId++, type, price, volume, Date.now(), false);
+                if (type === 'MP') order.price = this.bids.length ? this.bids[0].price : this.price - 1000;
+                if (type === 'ATO' || type === 'ATC') order.price = this.price;
+                this.asks.push(order);
                 this.asks.sort((a, b) => a.price - b.price || a.time - b.time);
             }
 
             matchOrders() {
+                let totalBidVolume = this.bids.reduce((sum, bid) => sum + bid.volume, 0);
+                let totalAskVolume = this.asks.reduce((sum, ask) => sum + ask.volume, 0);
+
                 while (this.bids.length > 0 && this.asks.length > 0 && this.bids[0].price >= this.asks[0].price) {
                     const matchedPrice = (this.bids[0].price + this.asks[0].price) / 2;
                     const matchedVolume = Math.min(this.bids[0].volume, this.asks[0].volume);
-                    
+                    const fee = matchedPrice * matchedVolume * 0.001; // Phí 0.1%
+
+                    // Biên độ giá ±7%
+                    const maxPrice = this.referencePrice * 1.07;
+                    const minPrice = this.referencePrice * 0.93;
+                    if (matchedPrice > maxPrice || matchedPrice < minPrice) break;
+
                     this.price = matchedPrice;
+                    this.totalVolume += matchedVolume;
+                    this.highPrice = Math.max(this.highPrice, matchedPrice);
+                    this.lowPrice = Math.min(this.lowPrice, matchedPrice);
+
                     const time = new Date().toLocaleTimeString();
-                    this.history.unshift({ price: matchedPrice, volume: matchedVolume, time });
+                    this.history.unshift({
+                        price: matchedPrice,
+                        volume: matchedVolume,
+                        time,
+                        fee,
+                        buyId: this.bids[0].id,
+                        sellId: this.asks[0].id
+                    });
                     this.priceHistory.push({ time, price: matchedPrice });
+
+                    if (document.getElementById('sound').checked) {
+                        new Audio('https://www.soundjay.com/buttons/beep-01a.mp3').play();
+                    }
 
                     if (this.bids[0].volume > this.asks[0].volume) {
                         this.bids[0].volume -= matchedVolume;
@@ -123,7 +176,15 @@
                         this.bids.shift();
                         this.asks.shift();
                     }
+
+                    totalBidVolume -= matchedVolume;
+                    totalAskVolume -= matchedVolume;
                 }
+
+                const volumeDiff = totalBidVolume - totalAskVolume;
+                this.pressure = volumeDiff * 0.01;
+                this.price += this.pressure;
+                this.price = Math.max(100, Math.min(this.referencePrice * 1.07, this.price));
             }
 
             getPrice() {
@@ -173,48 +234,52 @@
         const stocks = [
             new Stock("VinGroup", 50000),
             new Stock("Vietcombank", 80000),
-            new Stock("TSR", 60000)
+            new Stock("Tensoract", 60000)
         ];
         const vnIndex = new StockIndex("VN-Index", stocks);
 
         function generateRandomOrders(stock) {
             const currentPrice = stock.getPrice();
+            const orderTypes = ['LO', 'MP', 'ATO'];
             const numBids = Math.floor(Math.random() * 3) + 1;
             const numAsks = Math.floor(Math.random() * 3) + 1;
 
             for (let i = 0; i < numBids; i++) {
                 const price = currentPrice + (Math.random() * 1000 - 500);
                 const volume = Math.floor(Math.random() * 1000) + 100;
-                stock.addBid(Math.max(100, price), volume);
+                const type = orderTypes[Math.floor(Math.random() * orderTypes.length)];
+                stock.addBid(Math.max(100, price), volume, type);
             }
             for (let i = 0; i < numAsks; i++) {
                 const price = currentPrice + (Math.random() * 1000 - 500);
                 const volume = Math.floor(Math.random() * 1000) + 100;
-                stock.addAsk(Math.max(100, price), volume);
+                const type = orderTypes[Math.floor(Math.random() * orderTypes.length)];
+                stock.addAsk(Math.max(100, price), volume, type);
             }
         }
 
         function updateMarket() {
             const marketDiv = document.getElementById("market");
             if (!marketDiv.innerHTML) {
-                // Khởi tạo lần đầu
                 stocks.forEach((stock, index) => {
                     const stockDiv = document.createElement("div");
                     stockDiv.className = "stock-box";
+                    stockDiv.id = `stock-${stock.name}`;
                     stockDiv.innerHTML = `
                         <h2>${stock.name} - Giá: <span id="price-${index}">${stock.getPrice().toFixed(0)}</span> đồng</h2>
                         <div class="price-board">
                             <table class="bids" id="bids-${index}">
-                                <tr><th>Giá mua</th><th>KL</th></tr>
+                                <tr><th>ID</th><th>Loại</th><th>Giá mua</th><th>KL</th></tr>
                             </table>
                             <table class="asks" id="asks-${index}">
-                                <tr><th>Giá bán</th><th>KL</th></tr>
+                                <tr><th>ID</th><th>Loại</th><th>Giá bán</th><th>KL</th></tr>
                             </table>
                         </div>
                         <canvas id="chart-${index}"></canvas>
+                        <div class="stats" id="stats-${index}"></div>
                         <div class="history-full">
                             <table class="history" id="history-${index}">
-                                <tr><th>Thời gian</th><th>Giá khớp</th><th>KL</th></tr>
+                                <tr><th>Thời gian</th><th>Giá khớp</th><th>KL</th><th>Phí</th><th>Mua ID</th><th>Bán ID</th></tr>
                             </table>
                         </div>
                     `;
@@ -230,22 +295,41 @@
                 document.getElementById(`price-${index}`).textContent = stock.getPrice().toFixed(0);
                 
                 const bidsTable = document.getElementById(`bids-${index}`);
-                bidsTable.innerHTML = `<tr><th>Giá mua</th><th>KL</th></tr>` + 
-                    stock.bids.slice(0, 3).map(bid => `<tr><td>${bid.price.toFixed(0)}</td><td>${bid.volume}</td></tr>`).join('');
+                bidsTable.innerHTML = `<tr><th>ID</th><th>Loại</th><th>Giá mua</th><th>KL</th></tr>` + 
+                    stock.bids.slice(0, 3).map(bid => `<tr><td>${bid.id}</td><td>${bid.type}</td><td>${bid.price.toFixed(0)}</td><td>${bid.volume}</td></tr>`).join('');
                 
                 const asksTable = document.getElementById(`asks-${index}`);
-                asksTable.innerHTML = `<tr><th>Giá bán</th><th>KL</th></tr>` + 
-                    stock.asks.slice(0, 3).map(ask => `<tr><td>${ask.price.toFixed(0)}</td><td>${ask.volume}</td></tr>`).join('');
+                asksTable.innerHTML = `<tr><th>ID</th><th>Loại</th><th>Giá bán</th><th>KL</th></tr>` + 
+                    stock.asks.slice(0, 3).map(ask => `<tr><td>${ask.id}</td><td>${ask.type}</td><td>${ask.price.toFixed(0)}</td><td>${ask.volume}</td></tr>`).join('');
                 
                 const historyTable = document.getElementById(`history-${index}`);
-                historyTable.innerHTML = `<tr><th>Thời gian</th><th>Giá khớp</th><th>KL</th></tr>` + 
-                    stock.history.map(h => `<tr><td>${h.time}</td><td>${h.price.toFixed(0)}</td><td>${h.volume}</td></tr>`).join('');
+                historyTable.innerHTML = `<tr><th>Thời gian</th><th>Giá khớp</th><th>KL</th><th>Phí</th><th>Mua ID</th><th>Bán ID</th></tr>` + 
+                    stock.history.map(h => `<tr><td>${h.time}</td><td>${h.price.toFixed(0)}</td><td>${h.volume}</td><td>${h.fee.toFixed(0)}</td><td>${h.buyId}</td><td>${h.sellId}</td></tr>`).join('');
                 
+                const statsDiv = document.getElementById(`stats-${index}`);
+                statsDiv.innerHTML = `Tổng KL: ${stock.totalVolume} | Cao: ${stock.highPrice.toFixed(0)} | Thấp: ${stock.lowPrice.toFixed(0)} | Tham chiếu: ${stock.referencePrice.toFixed(0)}`;
+
                 stock.updateChart();
             });
 
             const indexValue = vnIndex.calculateIndex();
             document.getElementById("vn-index").textContent = indexValue.toFixed(0);
+
+            updateStockDisplay();
+        }
+
+        function updateStockDisplay() {
+            const selectedStock = document.getElementById("stock-select").value;
+            stocks.forEach(stock => {
+                const stockDiv = document.getElementById(`stock-${stock.name}`);
+                stockDiv.style.display = (selectedStock === 'all' || selectedStock === stock.name) ? 'block' : 'none';
+            });
+        }
+
+        function toggleCharts() {
+            document.querySelectorAll('canvas').forEach(chart => {
+                chart.style.display = chart.style.display === 'none' ? 'block' : 'none';
+            });
         }
 
         let intervalId = null;
