@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Market Simulator</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f4f4f4;
+        }
+        .market-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .stock-box {
+            width: 30%;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background-color: #fff;
+            box-shadow: 0 0 5px rgba(0,0,0,0.1);
+        }
+        .price-board, .history-full {
+            margin-top: 10px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 5px;
+            text-align: center;
+        }
+        th {
+            background-color: #f0f0f0;
+        }
+        .bids td { color: green; }
+        .asks td { color: red; }
+        .history td { font-size: 0.85em; }
+        .index-box {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #e0f7fa;
+            text-align: center;
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+        .controls {
+            margin-bottom: 20px;
+        }
+        canvas {
+            margin-top: 10px;
+            max-height: 200px;
+        }
+        .history-full {
+            max-height: 150px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Stock Market Simulator</h1>
+    <div class="controls">
+        <button onclick="toggleSimulation()">Start/Stop</button>
+        <span>Speed: <input type="range" id="speed" min="500" max="5000" value="2000" onchange="updateSpeed()"> ms</span>
+    </div>
+    <div id="market" class="market-container"></div>
+    <div class="index-box">VN-Index: <span id="vn-index">0</span> điểm</div>
+
+    <script>
+        // Class mô phỏng lệnh (order)
+        class Order {
+            constructor(price, volume, time) {
+                this.price = price;
+                this.volume = volume;
+                this.time = time;
+            }
+        }
+
+        class Stock {
+            constructor(name, initialPrice) {
+                this.name = name;
+                this.price = initialPrice;
+                this.bids = [];
+                this.asks = [];
+                this.history = []; 
+                this.priceHistory = [{ time: new Date().toLocaleTimeString(), price: initialPrice }]; 
+                this.chart = null;
+            }
+
+            addBid(price, volume) {
+                this.bids.push(new Order(price, volume, Date.now()));
+                this.bids.sort((a, b) => b.price - a.price || a.time - b.time);
+            }
+
+            addAsk(price, volume) {
+                this.asks.push(new Order(price, volume, Date.now()));
+                this.asks.sort((a, b) => a.price - b.price || a.time - b.time);
+            }
+
+            matchOrders() {
+                while (this.bids.length > 0 && this.asks.length > 0 && this.bids[0].price >= this.asks[0].price) {
+                    const matchedPrice = (this.bids[0].price + this.asks[0].price) / 2;
+                    const matchedVolume = Math.min(this.bids[0].volume, this.asks[0].volume);
+                    
+                    this.price = matchedPrice;
+                    const time = new Date().toLocaleTimeString();
+                    this.history.unshift({ price: matchedPrice, volume: matchedVolume, time });
+                    this.priceHistory.push({ time, price: matchedPrice });
+
+                    if (this.bids[0].volume > this.asks[0].volume) {
+                        this.bids[0].volume -= matchedVolume;
+                        this.asks.shift();
+                    } else if (this.asks[0].volume > this.bids[0].volume) {
+                        this.asks[0].volume -= matchedVolume;
+                        this.bids.shift();
+                    } else {
+                        this.bids.shift();
+                        this.asks.shift();
+                    }
+                }
+            }
+
+            getPrice() {
+                return this.price;
+            }
+
+            initChart(containerId) {
+                const ctx = document.getElementById(containerId).getContext('2d');
+                this.chart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: this.priceHistory.map(h => h.time),
+                        datasets: [{
+                            label: `${this.name} Price`,
+                            data: this.priceHistory.map(h => h.price),
+                            borderColor: 'blue',
+                            fill: false,
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        scales: { y: { beginAtZero: false } },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            updateChart() {
+                this.chart.data.labels = this.priceHistory.map(h => h.time);
+                this.chart.data.datasets[0].data = this.priceHistory.map(h => h.price);
+                this.chart.update();
+            }
+        }
+
+        class StockIndex {
+            constructor(name, stocks) {
+                this.name = name;
+                this.stocks = stocks;
+            }
+
+            calculateIndex() {
+                const totalPrice = this.stocks.reduce((sum, stock) => sum + stock.getPrice(), 0);
+                return totalPrice / this.stocks.length;
+            }
+        }
+
+        const stocks = [
+            new Stock("VinGroup", 50000),
+            new Stock("Vietcombank", 80000),
+            new Stock("TSR", 60000)
+        ];
+        const vnIndex = new StockIndex("VN-Index", stocks);
+
+        function generateRandomOrders(stock) {
+            const currentPrice = stock.getPrice();
+            const numBids = Math.floor(Math.random() * 3) + 1;
+            const numAsks = Math.floor(Math.random() * 3) + 1;
+
+            for (let i = 0; i < numBids; i++) {
+                const price = currentPrice + (Math.random() * 1000 - 500);
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                stock.addBid(Math.max(100, price), volume);
+            }
+            for (let i = 0; i < numAsks; i++) {
+                const price = currentPrice + (Math.random() * 1000 - 500);
+                const volume = Math.floor(Math.random() * 1000) + 100;
+                stock.addAsk(Math.max(100, price), volume);
+            }
+        }
+
+        function updateMarket() {
+            const marketDiv = document.getElementById("market");
+            if (!marketDiv.innerHTML) {
+                // Khởi tạo lần đầu
+                stocks.forEach((stock, index) => {
+                    const stockDiv = document.createElement("div");
+                    stockDiv.className = "stock-box";
+                    stockDiv.innerHTML = `
+                        <h2>${stock.name} - Giá: <span id="price-${index}">${stock.getPrice().toFixed(0)}</span> đồng</h2>
+                        <div class="price-board">
+                            <table class="bids" id="bids-${index}">
+                                <tr><th>Giá mua</th><th>KL</th></tr>
+                            </table>
+                            <table class="asks" id="asks-${index}">
+                                <tr><th>Giá bán</th><th>KL</th></tr>
+                            </table>
+                        </div>
+                        <canvas id="chart-${index}"></canvas>
+                        <div class="history-full">
+                            <table class="history" id="history-${index}">
+                                <tr><th>Thời gian</th><th>Giá khớp</th><th>KL</th></tr>
+                            </table>
+                        </div>
+                    `;
+                    marketDiv.appendChild(stockDiv);
+                    stock.initChart(`chart-${index}`);
+                });
+            }
+
+            stocks.forEach((stock, index) => {
+                generateRandomOrders(stock);
+                stock.matchOrders();
+
+                document.getElementById(`price-${index}`).textContent = stock.getPrice().toFixed(0);
+                
+                const bidsTable = document.getElementById(`bids-${index}`);
+                bidsTable.innerHTML = `<tr><th>Giá mua</th><th>KL</th></tr>` + 
+                    stock.bids.slice(0, 3).map(bid => `<tr><td>${bid.price.toFixed(0)}</td><td>${bid.volume}</td></tr>`).join('');
+                
+                const asksTable = document.getElementById(`asks-${index}`);
+                asksTable.innerHTML = `<tr><th>Giá bán</th><th>KL</th></tr>` + 
+                    stock.asks.slice(0, 3).map(ask => `<tr><td>${ask.price.toFixed(0)}</td><td>${ask.volume}</td></tr>`).join('');
+                
+                const historyTable = document.getElementById(`history-${index}`);
+                historyTable.innerHTML = `<tr><th>Thời gian</th><th>Giá khớp</th><th>KL</th></tr>` + 
+                    stock.history.map(h => `<tr><td>${h.time}</td><td>${h.price.toFixed(0)}</td><td>${h.volume}</td></tr>`).join('');
+                
+                stock.updateChart();
+            });
+
+            const indexValue = vnIndex.calculateIndex();
+            document.getElementById("vn-index").textContent = indexValue.toFixed(0);
+        }
+
+        let intervalId = null;
+        let speed = 2000;
+
+        function toggleSimulation() {
+            if (intervalId) {
+                clearInterval(intervalId);
+                intervalId = null;
+            } else {
+                intervalId = setInterval(updateMarket, speed);
+            }
+        }
+
+        function updateSpeed() {
+            speed = document.getElementById("speed").value;
+            if (intervalId) {
+                clearInterval(intervalId);
+                intervalId = setInterval(updateMarket, speed);
+            }
+        }
+
+        updateMarket();
+        intervalId = setInterval(updateMarket, speed);
+    </script>
+</body>
+</html>
